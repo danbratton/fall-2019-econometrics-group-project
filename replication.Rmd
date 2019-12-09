@@ -1,0 +1,263 @@
+---
+title: "Econometrics Final Project"
+output: html_document
+---
+```{r}
+library(plyr)
+library(dplyr)
+library(haven)
+library(labelled)
+library(readxl)
+library(plm)
+library(lmtest)
+library(ggplot2)
+library(MASS)
+```
+
+```{r}
+gps = read_dta('data/GPS_dataset_individual_level/individual.dta')
+gallup = read_dta('data/The_Gallup_World_Poll_032219_subset2.dta')
+```
+
+```{r}
+# Clean data for use
+merged = merge(gps, gallup, by.x = "id_gallup", by.y = "wpid", all.x = TRUE)
+
+f1 = " ~ country"
+f2 = " ~ region + WP1220 + WP1220^2"
+
+gallup_binary = function(ogvar){
+  dummyvar = ifelse(ogvar == 1, 1,
+                ifelse(ogvar == 2, 0, NaN))
+  return(dummyvar)
+}
+
+# Entrepreneurship
+merged$own_business = ifelse(merged$WP1225 == 3, 1, ifelse(merged$WP1225 < 13, 0, NaN))
+merged$start_business = gallup_binary(merged$WP12456)
+merged$plan_start_bus = gallup_binary(merged$WP12457)
+
+# Savings decisions
+merged$saved = gallup_binary(merged$WP7297)
+
+# Education
+merged$educ = ifelse(merged$WP3117 %in% c(1,2,3), merged$WP3117, NaN)
+
+# Smoking
+merged$smoke = merged$WP10931 %>% mapvalues(c(3,2,1,5,6), c(0,1,2,NaN,NaN))
+
+# Controls
+merged$age = ifelse(merged$WP1220 == 100, NaN, merged$WP1220)
+merged$age2 = merged$age^2
+merged$female = ifelse(merged$WP1219 == 2, 1, 0)
+merged$religion = ifelse(merged$WP1233 > 96, NaN, merged$WP1233)
+merged$region1 = factor(merged$region, exclude = NaN)
+
+# PPP data for converting income measures
+pppraw = read_xls("data/imf-dm-export-20191203.xls")
+colnames(pppraw)[1] = "country"
+ppp = pppraw %>% select("country", "2012")
+colnames(ppp)[2] = "pppvalue"
+# fix names
+ppp = ppp %>% mutate(country = replace(country, country == "Bosnia and Herzegovina", "Bosnia Herzegovina"))
+ppp = ppp %>% mutate(country = replace(country, country == "China, People's Republic of", "China"))
+ppp = ppp %>% mutate(country = replace(country, country == "Russian Federation", "Russia"))
+ppp = ppp %>% mutate(country = replace(country, country == "Korea, Republic of", "South Korea"))
+ppp = ppp %>% transform(pppvalue = as.numeric(pppvalue))
+ppp$pppvalue[ppp$pppvalue == 0] <- NaN
+
+
+merged = merge(merged, ppp, by = "country", all.x = TRUE)
+# create scaled income
+merged = merged %>% mutate(inc_scl = INCOME_1 / pppvalue)
+summary(merged$inc_scl)
+merged$l_inc = log(merged$inc_scl + 1)
+```
+
+
+```{r}
+# replication of Table VII
+# Accumulation Decisions
+# Outcome: savings decisions
+reg1 = plm(saved ~ patience + country, merged, index = c("country"))
+coeftest(reg1, vcov = vcovHC(reg1, type = "sss", cluster = "group"))
+
+reg2 = plm(saved ~ patience + age + age2 +  female + l_inc + subj_math_skills + factor(religion, exclude = NaN) + region, data = merged, index = c("country"))
+coeftest(reg2, vcov = vcovHC(reg2, type = "sss", cluster = "group"))
+
+# Outcome: education
+reg3 = plm(educ ~ patience + country, merged, index = c("country"))
+coeftest(reg3, vcov = vcovHC(reg3, type = "sss", cluster = "group"))
+
+reg4 = plm(educ ~ patience + age + age2 +  female + l_inc + subj_math_skills + factor(religion, exclude = NaN) + region, data = merged, index = c("country"))
+coeftest(reg4, vcov = vcovHC(reg4, type = "sss", cluster = "group"))
+
+# Risky choices
+# NOTE: both start_business and own_business fail to replicate paper results exactly
+# start_business is derived from a binary "start a business" variable from the Gallup data
+# own_business is derived from a "type of work" variable from the Gallup data
+
+# Outcome: own business
+reg5 =  plm(own_business ~ risktaking + country, merged, index = c("country"))
+coeftest(reg5, vcov = vcovHC(reg5, type = "sss", cluster = "group"))
+
+reg6 = plm(own_business ~ risktaking + age + age2 +  female + l_inc + subj_math_skills + factor(religion, exclude = NaN) + region, data = merged, index = c("country"))
+coeftest(reg6, vcov = vcovHC(reg6, type = "sss", cluster = "group"))
+
+# Outcome: plan to start business
+reg7 =  plm(plan_start_bus ~ risktaking + country, merged, index = c("country"))
+coeftest(reg7, vcov = vcovHC(reg7, type = "sss", cluster = "group"))
+
+reg8 = plm(plan_start_bus ~ risktaking + age + age2 +  female + l_inc + subj_math_skills + factor(religion, exclude = NaN) + region, data = merged, index = c("country"))
+coeftest(reg8, vcov = vcovHC(reg6, type = "sss", cluster = "group"))
+
+# Outcome: smoking
+reg9 =  plm(smoke ~ risktaking + country, merged, index = c("country"))
+coeftest(reg9, vcov = vcovHC(reg9, type = "sss", cluster = "group"))
+
+reg10 = plm(smoke ~ risktaking + age + age2 +  female + l_inc + subj_math_skills + factor(religion, exclude = NaN) + region, data = merged, index = c("country"))
+coeftest(reg10, vcov = vcovHC(reg10, type = "sss", cluster = "group"))
+```
+
+```{r}
+# Mean patience by country
+country_means = merged %>% subset(!is.na(patience) & !is.na(saved)) %>% group_by(country) %>% summarise(mean_patience = mean(patience), mean_saving = mean(saved))
+x = country_means[order(country_means$mean_patience),]
+x
+```
+
+```{r}
+model <- glm(
+  saved ~ patience + age + age2 +  female + country +
+  l_inc + subj_math_skills + 
+  factor(religion, exclude = NaN)
+  , data=merged, family = binomial(link="probit"))
+
+```
+
+
+
+```{r}
+# Create a temporary data frame of hypothetical values
+plot_probit = function(country){  
+  temp.data <- data.frame(patience = seq(-2, 2, 0.1), 
+                          age = 40,
+                          age2 = 1600,
+                          female = 1,
+                          subj_math_skills = 5,
+                          l_inc = 10,
+                          religion = 1,
+                          country = country)
+  
+  # Predict the fitted values given the model and hypothetical data
+  predicted.data <- as.data.frame(predict(model, newdata = temp.data, 
+                                          type="link", se=TRUE))
+  
+  # Combine the hypothetical data and predicted values
+  new.data <- cbind(temp.data, predicted.data)
+  
+  # Calculate confidence intervals
+  std <- qnorm(0.95 / 2 + 0.5)
+  new.data$ymin <- model$family$linkinv(new.data$fit - std * new.data$se)
+  new.data$ymax <- model$family$linkinv(new.data$fit + std * new.data$se)
+  new.data$fit <- model$family$linkinv(new.data$fit)  # Rescale to 0-1
+  
+  # Plot everything
+  p <- ggplot(merged %>% subset(country == country), aes(x=patience, y=saved)) 
+  p + geom_point() + 
+    geom_ribbon(data=new.data, aes(y=fit, ymin=ymin, ymax=ymax), alpha=0.5) + 
+    geom_line(data=new.data, aes(y=fit)) + 
+    labs(x="Patience", y="Savings Decisions") +
+    ggtitle(paste("Probit Regression: Predicted Values ", country))
+} 
+plot_probit("Sri Lanka")
+plot_probit("South Korea")
+plot_probit("Georgia")
+plot_probit("Japan")
+summary(model)
+
+```
+```{r}
+# Effect of Georgia
+Georgia <- data.frame(patience = 0, 
+                          age = 40,
+                          age2 = 1600,
+                          female = 1,
+                          subj_math_skills = 5,
+                          l_inc = 10,
+                          religion = 1,
+                          country = "Georgia")
+
+SKorea <- data.frame(patience = 0, 
+                          age = 40,
+                          age2 = 1600,
+                          female = 1,
+                          subj_math_skills = 5,
+                          l_inc = 10,
+                          religion = 1,
+                          country = "South Korea")
+predict(model, newdata = Georgia, type = "response") - predict(model, newdata = SKorea, type = "response")
+```
+
+
+```{r}
+model1 <- polr(
+  factor(educ, exclude = NaN) ~ patience + age + age2 +  female + country + patience * country +
+  l_inc + subj_math_skills + 
+  factor(religion, exclude = NaN)
+  , data=merged, method = "probit")
+
+```
+
+```{r}
+subset = merged %>% subset(country %in% c("South Korea"))
+table(subset$educ)
+```
+
+
+```{r}
+# Create a temporary data frame of hypothetical values
+plot_probit = function(country){  
+  temp.data <- data.frame(patience = seq(-2, 2, 0.1), 
+                          age = 40,
+                          age2 = 1600,
+                          female = 1,
+                          subj_math_skills = 5,
+                          l_inc = 10,
+                          religion = 1,
+                          country = country)
+  
+  # Predict the fitted values given the model and hypothetical data
+  predicted.data <- as.data.frame(predict(model1, newdata = temp.data, 
+                                          type="probs", se=TRUE))
+  
+  # Combine the hypothetical data and predicted values
+  new.data <- cbind(temp.data, predicted.data)
+
+  educ1 = predicted.data[,1]
+  educ2 = predicted.data[,2]
+  educ3 = predicted.data[,3]
+  
+  # Plot everything
+  p <- ggplot(merged %>% subset(country == country), aes(x=patience, y=saved)) 
+  p + geom_point() +  
+    geom_line(data=new.data, aes(y=educ1, colour = "educ1")) + 
+    geom_line(data=new.data, aes(y=educ2, colour = "educ2")) +
+    geom_line(data=new.data, aes(y=educ3, colour = "educ3")) +
+    labs(x="Patience", y="Education Level") +
+
+    ggtitle(paste("Probit Regression: Predicted Values ", country))
+} 
+plot_probit("Georgia")
+plot_probit("South Korea")
+plot_probit("United States")
+plot_probit("Sri Lanka")
+
+# predict(model1, Georgia, type = "probs")
+```
+
+```{r}
+temp = merged[complete.cases(merged[c("patience", "saved")]),]
+temp$country %>% unique()
+```
+
